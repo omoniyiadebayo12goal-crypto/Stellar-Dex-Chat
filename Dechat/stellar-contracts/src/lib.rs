@@ -240,6 +240,20 @@ pub struct BatchResult {
 
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TokenAllowlistEntry {
+    pub token: Address,
+    pub address: Address,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TokenAllowlistEnabledEntry {
+    pub token: Address,
+    pub enabled: bool,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ConfigSnapshot {
     pub admin: Address,
     pub pending_admin: Option<Address>,
@@ -666,6 +680,10 @@ pub enum DataKey {
     UserDailyDeposit(Address, Address),
     TokenAllowlistEnabled(Address),
     TokenAllowed(Address, Address),
+    TokenAllowlistIndex(u64),
+    TokenAllowlistCount,
+    TokenAllowlistEnabledIndex(u64),
+    TokenAllowlistEnabledCount,
     UserDailyWithdrawal(Address),
     EscrowStorageVersion,
     EscrowRecord(u64),
@@ -1708,7 +1726,28 @@ impl FiatBridge {
         admin.require_auth();
         env.storage()
             .instance()
-            .set(&DataKey::TokenAllowlistEnabled(token), &enabled);
+            .set(&DataKey::TokenAllowlistEnabled(token.clone()), &enabled);
+
+        // Append to token allowlist enabled index for enumeration
+        let count: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::TokenAllowlistEnabledCount)
+            .unwrap_or(0);
+        if count == u64::MAX {
+            return Err(Error::Overflow);
+        }
+        let entry = TokenAllowlistEnabledEntry {
+            token: token.clone(),
+            enabled,
+        };
+        env.storage()
+            .persistent()
+            .set(&DataKey::TokenAllowlistEnabledIndex(count), &entry);
+        env.storage()
+            .instance()
+            .set(&DataKey::TokenAllowlistEnabledCount, &(count.checked_add(1).ok_or(Error::Overflow)?));
+
         Ok(())
     }
 
@@ -1721,7 +1760,28 @@ impl FiatBridge {
         admin.require_auth();
         env.storage()
             .persistent()
-            .set(&DataKey::TokenAllowed(token, address), &true);
+            .set(&DataKey::TokenAllowed(token.clone(), address.clone()), &true);
+
+        // Append to token allowlist index for enumeration
+        let count: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::TokenAllowlistCount)
+            .unwrap_or(0);
+        if count == u64::MAX {
+            return Err(Error::Overflow);
+        }
+        let entry = TokenAllowlistEntry {
+            token: token.clone(),
+            address: address.clone(),
+        };
+        env.storage()
+            .persistent()
+            .set(&DataKey::TokenAllowlistIndex(count), &entry);
+        env.storage()
+            .instance()
+            .set(&DataKey::TokenAllowlistCount, &(count.checked_add(1).ok_or(Error::Overflow)?));
+
         Ok(())
     }
 
@@ -1734,7 +1794,29 @@ impl FiatBridge {
         admin.require_auth();
         env.storage()
             .persistent()
-            .remove(&DataKey::TokenAllowed(token, address));
+            .remove(&DataKey::TokenAllowed(token.clone(), address.clone()));
+
+        // Tombstone the index slot (mark as removed) without compacting
+        let count: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::TokenAllowlistCount)
+            .unwrap_or(0);
+        for i in 0..count {
+            if let Some(entry) = env
+                .storage()
+                .persistent()
+                .get::<_, TokenAllowlistEntry>(&DataKey::TokenAllowlistIndex(i))
+            {
+                if entry.token == token && entry.address == address {
+                    env.storage()
+                        .persistent()
+                        .remove(&DataKey::TokenAllowlistIndex(i));
+                    break;
+                }
+            }
+        }
+
         Ok(())
     }
 
@@ -2678,6 +2760,61 @@ impl FiatBridge {
                 collected += 1;
             }
             // Use checked_add to prevent overflow when iterating the denylist index
+            idx = match idx.checked_add(1) {
+                Some(next) => next,
+                None => break,
+            };
+        }
+        result
+    }
+
+    pub fn get_token_allowlist(env: Env, offset: u64, limit: u32) -> Vec<TokenAllowlistEntry> {
+        let count: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::TokenAllowlistCount)
+            .unwrap_or(0);
+        let mut result: Vec<TokenAllowlistEntry> = Vec::new(&env);
+        let mut collected: u32 = 0;
+        let mut idx = offset;
+        while idx < count && collected < limit {
+            if let Some(entry) = env
+                .storage()
+                .persistent()
+                .get::<_, TokenAllowlistEntry>(&DataKey::TokenAllowlistIndex(idx))
+            {
+                // Only include entries that still exist in the actual allowlist
+                if env.storage().persistent().has(&DataKey::TokenAllowed(entry.token.clone(), entry.address.clone())) {
+                    result.push_back(entry);
+                    collected += 1;
+                }
+            }
+            idx = match idx.checked_add(1) {
+                Some(next) => next,
+                None => break,
+            };
+        }
+        result
+    }
+
+    pub fn get_token_allowlist_enabled(env: Env, offset: u64, limit: u32) -> Vec<TokenAllowlistEnabledEntry> {
+        let count: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::TokenAllowlistEnabledCount)
+            .unwrap_or(0);
+        let mut result: Vec<TokenAllowlistEnabledEntry> = Vec::new(&env);
+        let mut collected: u32 = 0;
+        let mut idx = offset;
+        while idx < count && collected < limit {
+            if let Some(entry) = env
+                .storage()
+                .persistent()
+                .get::<_, TokenAllowlistEnabledEntry>(&DataKey::TokenAllowlistEnabledIndex(idx))
+            {
+                result.push_back(entry);
+                collected += 1;
+            }
             idx = match idx.checked_add(1) {
                 Some(next) => next,
                 None => break,
