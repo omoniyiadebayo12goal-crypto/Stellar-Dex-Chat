@@ -5,10 +5,13 @@ dex_with_fiat_frontend/node_modules/
 stellar-contracts/target/
 
 # Local environment files
-.env.local
 
 # Contract build artifacts
 *.wasm
 
 issue.md
 pr.md
+branch_structure.json
+temp_auto_push.bat
+temp_interactive_push.bat
+config.bat
